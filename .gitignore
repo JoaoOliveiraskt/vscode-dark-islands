@@ -1,5 +1,6 @@
 .DS_Store
 *.vsix
+dist/
 node_modules/
 result/
 AGENTS.md

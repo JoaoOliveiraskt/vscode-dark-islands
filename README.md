@@ -73,6 +73,44 @@ cd islands-dark
 .\install.ps1
 ```
 
+### Antigravity Install
+
+Antigravity uses its own extension directory, separate from VS Code. You can install Islands Dark in both editors at the same time.
+
+On Windows:
+
+```powershell
+git clone https://github.com/bwya77/vscode-dark-islands.git islands-dark
+cd islands-dark
+.\install-antigravity.ps1
+```
+
+The Antigravity installer will:
+- Package the theme as a local VSIX when Node.js/npm is available
+- Install it with Antigravity's own CLI (`antigravity --install-extension`)
+- Fall back to copying the extension into `~\.antigravity\extensions` if VSIX packaging is unavailable
+- Apply the recommended Antigravity user settings
+
+You can also run it through npm:
+
+```powershell
+npm run install:antigravity
+```
+
+If you only want to package the VSIX:
+
+```powershell
+npm run package
+```
+
+Then install the generated `.vsix` from Antigravity:
+1. Open **Extensions** in Antigravity
+2. Click **...**
+3. Select **Install from VSIX...**
+4. Choose the generated file from `dist/`
+
+> **Note:** Islands Dark does not need to be on Open VSX to work locally in Antigravity. Publishing to Open VSX is only needed if you want the theme to appear in Antigravity marketplace search for everyone.
+
 The scripts will automatically:
 - ✅ Install the Islands Dark theme extension
 - ✅ Install the Custom UI Style extension

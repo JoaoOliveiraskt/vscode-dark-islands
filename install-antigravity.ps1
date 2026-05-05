@@ -1,5 +1,5 @@
 # Islands Dark Theme Installer for Antigravity
-# Antigravity is Google's AI-powered IDE built as a fork of VS Code
+# Antigravity is a VS Code-compatible IDE with its own CLI and extensions dir.
 
 param()
 
@@ -9,82 +9,184 @@ Write-Host "Islands Dark Theme Installer for Antigravity" -ForegroundColor Cyan
 Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Check if Antigravity is installed by looking for the .gemini/antigravity directory
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$packageFile = Join-Path $scriptDir "package.json"
+$package = Get-Content $packageFile -Raw | ConvertFrom-Json
+$extensionId = "$($package.publisher).$($package.name)"
+$extensionFolderName = "$extensionId-$($package.version)"
+
+function Find-AntigravityCli {
+    $command = Get-Command "antigravity" -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $possiblePaths = @(
+        "$env:LOCALAPPDATA\Programs\Antigravity\bin\antigravity.cmd",
+        "$env:LOCALAPPDATA\Programs\Antigravity\bin\antigravity.exe",
+        "$env:ProgramFiles\Antigravity\bin\antigravity.cmd",
+        "${env:ProgramFiles(x86)}\Antigravity\bin\antigravity.cmd"
+    )
+
+    foreach ($path in $possiblePaths) {
+        if ($path -and (Test-Path $path)) {
+            return $path
+        }
+    }
+
+    return $null
+}
+
+function Invoke-CommandChecked {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [string]$WorkingDirectory = $scriptDir
+    )
+
+    Push-Location $WorkingDirectory
+    try {
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+
+        $hasNativePreference = Test-Path Variable:\PSNativeCommandUseErrorActionPreference
+        if ($hasNativePreference) {
+            $previousNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+
+        try {
+            $output = & $Command @Arguments 2>&1
+            $exitCode = $LASTEXITCODE
+        } finally {
+            if ($hasNativePreference) {
+                $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+            }
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        $output | ForEach-Object {
+            Write-Host $_
+        }
+
+        if ($exitCode -ne 0) {
+            throw "Command failed with exit code $exitCode`: $Command $($Arguments -join ' ')"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function New-IslandsVsix {
+    $npx = Get-Command "npx.cmd" -ErrorAction SilentlyContinue
+    if (-not $npx) {
+        $npx = Get-Command "npx" -ErrorAction SilentlyContinue
+    }
+
+    if (-not $npx) {
+        return $null
+    }
+
+    $distDir = Join-Path $scriptDir "dist"
+    if (-not (Test-Path $distDir)) {
+        New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+    }
+
+    $vsixPath = Join-Path $distDir "$($package.name)-$($package.version).vsix"
+    if (Test-Path $vsixPath) {
+        Remove-Item -LiteralPath $vsixPath -Force
+    }
+
+    Write-Host "   Packaging $extensionId@$($package.version) as VSIX..."
+    Invoke-CommandChecked -Command $npx.Source -Arguments @("--yes", "@vscode/vsce", "package", "--out", $vsixPath)
+
+    if (Test-Path $vsixPath) {
+        return $vsixPath
+    }
+
+    return $null
+}
+
+function Install-ThemeByCopyFallback {
+    Write-Host "   VSIX packaging unavailable; copying extension files directly." -ForegroundColor Yellow
+
+    $extensionsDir = "$env:USERPROFILE\.antigravity\extensions"
+    $targetDir = Join-Path $extensionsDir $extensionFolderName
+
+    if (Test-Path $targetDir) {
+        Remove-Item -LiteralPath $targetDir -Recurse -Force
+    }
+
+    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    Copy-Item (Join-Path $scriptDir "package.json") $targetDir -Force
+    Copy-Item (Join-Path $scriptDir "README.md") $targetDir -Force
+    Copy-Item (Join-Path $scriptDir "themes") (Join-Path $targetDir "themes") -Recurse -Force
+
+    $extensionsJson = Join-Path $extensionsDir "extensions.json"
+    if (Test-Path $extensionsJson) {
+        Remove-Item -LiteralPath $extensionsJson -Force
+    }
+
+    return $targetDir
+}
+
 $antigravityDir = "$env:USERPROFILE\.gemini\antigravity"
-if (-not (Test-Path $antigravityDir)) {
-    Write-Host "Error: Antigravity directory not found!" -ForegroundColor Red
-    Write-Host "Expected location: $antigravityDir"
-    Write-Host "Please ensure Antigravity is installed and has been run at least once."
+$antigravityUserDir = "$env:APPDATA\Antigravity"
+$antigravityExtensionsDir = "$env:USERPROFILE\.antigravity\extensions"
+
+if (-not ((Test-Path $antigravityDir) -or (Test-Path $antigravityUserDir) -or (Test-Path $antigravityExtensionsDir))) {
+    Write-Host "Error: Antigravity was not found." -ForegroundColor Red
+    Write-Host "Please install and run Antigravity at least once before using this installer."
     exit 1
 }
 
-Write-Host "Antigravity installation found" -ForegroundColor Green
-
-# Get the directory where this script is located
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$antigravityCli = Find-AntigravityCli
+if ($antigravityCli) {
+    Write-Host "Antigravity CLI found: $antigravityCli" -ForegroundColor Green
+} else {
+    Write-Host "Antigravity CLI was not found; direct extension copy will be used." -ForegroundColor Yellow
+}
 
 Write-Host ""
 Write-Host "Step 1: Installing Islands Dark theme extension..."
 
-# Antigravity uses VS Code-compatible extensions
-# Install by copying to Antigravity extensions directory
-$extDir = "$env:USERPROFILE\.vscode\extensions\bwya77.islands-dark-1.0.0"
-if (Test-Path $extDir) {
-    Remove-Item -Recurse -Force $extDir
+$installedByVsix = $false
+if ($antigravityCli) {
+    try {
+        $vsixPath = New-IslandsVsix
+        if ($vsixPath) {
+            Invoke-CommandChecked -Command $antigravityCli -Arguments @("--install-extension", $vsixPath, "--force")
+            $installedByVsix = $true
+            Write-Host "Theme extension installed with Antigravity CLI" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "Could not install with VSIX: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 }
-New-Item -ItemType Directory -Path $extDir -Force | Out-Null
-Copy-Item "$scriptDir\package.json" "$extDir\" -Force
-Copy-Item "$scriptDir\themes" "$extDir\themes" -Recurse -Force
 
-if (Test-Path "$extDir\themes") {
-    Write-Host "Theme extension installed to $extDir" -ForegroundColor Green
-} else {
-    Write-Host "Failed to install theme extension" -ForegroundColor Red
-    exit 1
+if (-not $installedByVsix) {
+    $targetDir = Install-ThemeByCopyFallback
+    Write-Host "Theme extension installed to $targetDir" -ForegroundColor Green
 }
 
 Write-Host ""
 Write-Host "Step 2: Installing Custom UI Style extension..."
-Write-Host "   Note: Antigravity supports VS Code extensions" -ForegroundColor DarkGray
-try {
-    # Use code CLI if available (Antigravity may use same command)
-    $codePath = Get-Command "code" -ErrorAction SilentlyContinue
-    if ($codePath) {
-        $output = code --install-extension subframe7536.custom-ui-style --force 2>&1
-        Write-Host "Custom UI Style extension installed" -ForegroundColor Green
-    } else {
-        # Try common VS Code installation paths
-        $possiblePaths = @(
-            "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd",
-            "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd",
-            "${env:ProgramFiles(x86)}\Microsoft VS Code\bin\code.cmd"
-        )
-        
-        $found = $false
-        foreach ($path in $possiblePaths) {
-            if (Test-Path $path) {
-                & $path --install-extension subframe7536.custom-ui-style --force 2>&1 | Out-Null
-                $found = $true
-                Write-Host "Custom UI Style extension installed" -ForegroundColor Green
-                break
-            }
-        }
-        
-        if (-not $found) {
-            Write-Host "Could not install Custom UI Style extension automatically" -ForegroundColor Yellow
-            Write-Host "   Please install it manually from the Extensions marketplace in Antigravity"
-        }
+if ($antigravityCli) {
+    try {
+        Invoke-CommandChecked -Command $antigravityCli -Arguments @("--install-extension", "subframe7536.custom-ui-style", "--force")
+        Write-Host "Custom UI Style extension installed in Antigravity" -ForegroundColor Green
+    } catch {
+        Write-Host "Could not install Custom UI Style automatically in Antigravity" -ForegroundColor Yellow
+        Write-Host "   Install it manually in Antigravity if CSS customizations do not apply."
     }
-} catch {
-    Write-Host "Could not install Custom UI Style extension automatically" -ForegroundColor Yellow
-    Write-Host "   Please install it manually from the Extensions marketplace in Antigravity"
+} else {
+    Write-Host "Could not install Custom UI Style automatically without the Antigravity CLI" -ForegroundColor Yellow
 }
 
 Write-Host ""
 Write-Host "Step 3: Installing Bear Sans UI fonts..."
 $fontDir = "$env:LOCALAPPDATA\Microsoft\Windows\Fonts"
 
-# Try user fonts first
 if (-not (Test-Path $fontDir)) {
     New-Item -ItemType Directory -Path $fontDir -Force | Out-Null
 }
@@ -95,7 +197,7 @@ try {
         try {
             Copy-Item $font.FullName $fontDir -Force -ErrorAction SilentlyContinue
         } catch {
-            # Silently continue if copy fails
+            # Continue if a font is already installed or locked.
         }
     }
 
@@ -110,25 +212,18 @@ try {
 Write-Host ""
 Write-Host "Step 4: Applying Antigravity settings..."
 
-# Antigravity uses the same settings structure as VS Code
-# Primary location: %APPDATA%\Antigravity\User\settings.json
 $settingsDir = "$env:APPDATA\Antigravity\User"
 $settingsFile = "$settingsDir\settings.json"
 
-# Create settings directory if it doesn't exist
 if (-not (Test-Path $settingsDir)) {
     Write-Host "Creating Antigravity settings directory..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
 }
 
-# Function to strip JSONC features (comments and trailing commas) for JSON parsing
 function Strip-Jsonc {
     param([string]$Text)
-    # Remove single-line comments
-    $Text = $Text -replace '//.*$', ''
-    # Remove multi-line comments
+    $Text = $Text -replace '(?m)^\s*//.*$', ''
     $Text = $Text -replace '/\*[\s\S]*?\*/', ''
-    # Remove trailing commas before } or ]
     $Text = $Text -replace ',\s*([}\]])', '$1'
     return $Text
 }
@@ -145,7 +240,6 @@ if (Test-Path $settingsFile) {
         $existingRaw = Get-Content $settingsFile -Raw
         $existingSettings = (Strip-Jsonc $existingRaw) | ConvertFrom-Json
 
-        # Merge settings - Islands Dark settings take precedence
         $mergedSettings = @{}
         $existingSettings.PSObject.Properties | ForEach-Object {
             $mergedSettings[$_.Name] = $_.Value
@@ -154,7 +248,6 @@ if (Test-Path $settingsFile) {
             $mergedSettings[$_.Name] = $_.Value
         }
 
-        # Deep merge custom-ui-style.stylesheet
         $stylesheetKey = 'custom-ui-style.stylesheet'
         if ($existingSettings.$stylesheetKey -and $newSettings.$stylesheetKey) {
             $mergedStylesheet = @{}
@@ -182,7 +275,6 @@ if (Test-Path $settingsFile) {
 Write-Host ""
 Write-Host "Step 5: Enabling Custom UI Style..."
 
-# Check if this is the first run
 $firstRunFile = Join-Path $scriptDir ".islands_dark_first_run_antigravity"
 if (-not (Test-Path $firstRunFile)) {
     New-Item -ItemType File -Path $firstRunFile | Out-Null
